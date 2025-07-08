@@ -2,6 +2,8 @@
 
 [arXiv] [Efficient Evolutionary Search Over Chemical Space with Large Language Models](https://arxiv.org/abs/2406.16976)
 
+[ICLR 2025] [Efficient Evolutionary Search Over Chemical Space with Large Language Models](https://openreview.net/forum?id=awWiNvQwf3)
+
 [Website] [MolLEO Project](https://molleo.github.io/)
 
 ## About
@@ -60,13 +62,12 @@ python run.py molleo_multi_pareto --mol_lm GPT-4 --min_obj sa gsk3b drd2 --max_o
 If you find our work helpful, please consider citing our paper:
 
 ```
-@misc{wang2024efficientevolutionarysearchchemical,
-      title={Efficient Evolutionary Search Over Chemical Space with Large Language Models}, 
-      author={Haorui Wang and Marta Skreta and Cher-Tian Ser and Wenhao Gao and Lingkai Kong and Felix Streith-Kalthoff and Chenru Duan and Yuchen Zhuang and Yue Yu and Yanqiao Zhu and Yuanqi Du and Alán Aspuru-Guzik and Kirill Neklyudov and Chao Zhang},
-      year={2024},
-      eprint={2406.16976},
-      archivePrefix={arXiv},
-      primaryClass={cs.NE}
-      url={https://arxiv.org/abs/2406.16976}, 
+@inproceedings{
+      wang2025efficient,
+      title={Efficient Evolutionary Search Over Chemical Space with Large Language Models},
+      author={Haorui Wang and Marta Skreta and Cher Tian Ser and Wenhao Gao and Lingkai Kong and Felix Strieth-Kalthoff and Chenru Duan and Yuchen Zhuang and Yue Yu and Yanqiao Zhu and Yuanqi Du and Alan Aspuru-Guzik and Kirill Neklyudov and Chao Zhang},
+      booktitle={The Thirteenth International Conference on Learning Representations},
+      year={2025},
+      url={https://openreview.net/forum?id=awWiNvQwf3}
 }
 ```
