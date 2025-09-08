@@ -1,4 +1,5 @@
 import os
+import requests
 import yaml
 import random
 import torch
@@ -9,6 +10,8 @@ import tdc
 from tdc.generation import MolGen
 from main.utils.chem import *
 import math
+
+from .boltz import calculate_boltz
 
 
 class Objdict(dict):
@@ -84,7 +87,7 @@ class Oracle:
         if suffix is None:
             output_file_path = os.path.join(self.args.output_dir, 'results.yaml')
         else:
-            output_file_path = os.path.join(self.args.output_dir, 'results_' + suffix + '.yaml')
+            output_file_path = os.path.join(self.args.output_dir, 'results/' + suffix + '.yaml')
 
         self.sort_buffer()
         with open(output_file_path, 'w') as f:
@@ -114,7 +117,7 @@ class Oracle:
                     n_calls = self.max_oracle_calls
             else:
                 # Otherwise, log the input moleucles
-                smis = [Chem.MolToSmiles(m) for m in mols]
+                smis = [Chem.MolToSmiles(m, canonical=True) for m in mols]
                 n_calls = len(self.mol_buffer)
 
         # Uncomment this line if want to log top-10 moelucles figures, so as the best_mol key values.
@@ -152,6 +155,22 @@ class Oracle:
     def __len__(self):
         return len(self.mol_buffer)
 
+    def get_docking_data(self, smiles, protein):
+            try:
+                response = requests.get(f"https://west.ucsd.edu/llm_project/?endpoint=run_docking&smiles={smiles}&target={protein}")
+                if response.status_code == 200:
+                    data = response.json()
+                    if 'error' in data:
+                        return 0
+                    return data["binding_affinity"]
+                else:
+                    time.sleep(60)
+                    return 0
+            except Exception as e:
+                print(e)
+                time.sleep(60)
+                return 0
+
     def score_smi(self, smi):
         """
         Function to score one molecule
@@ -168,21 +187,24 @@ class Oracle:
             return 0
         mol = Chem.MolFromSmiles(smi)
         if mol is None or len(smi) == 0:
+            print("None", flush=True)
             return 0
         else:
-            smi = Chem.MolToSmiles(mol)
+            smi = Chem.MolToSmiles(mol, canonical=True)
             if smi in self.mol_buffer:
+                print("Already in buffer", flush=True)
                 pass
             else:
-                fitness = float(self.evaluator(smi))
+                print(smi, flush=True)
+                fitness = -float(calculate_boltz(self.evaluator, smi))
+                print(fitness, flush=True)
                 #print(fitness, type(fitness))
                 if math.isnan(fitness):
                     fitness = 0
-                if "docking" in self.args.oracles[0]:
-                    fitness *= -1
 
                 self.mol_buffer[smi] = [fitness, len(self.mol_buffer)+1]
             return self.mol_buffer[smi][0]
+
 
     def __call__(self, smiles_lst):
         """
@@ -190,20 +212,21 @@ class Oracle:
         """
         if type(smiles_lst) == list:
             score_list = []
+            print(len(smiles_lst), flush=True)
             for smi in smiles_lst:
                 score_list.append(self.score_smi(smi))
                 if len(self.mol_buffer) % self.freq_log == 0 and len(self.mol_buffer) > self.last_log:
                     self.sort_buffer()
                     self.log_intermediate()
                     self.last_log = len(self.mol_buffer)
-                    self.save_result(self.task_label)
+                    # self.save_result(self.args.run_name)
         else:  ### a string of SMILES
             score_list = self.score_smi(smiles_lst)
             if len(self.mol_buffer) % self.freq_log == 0 and len(self.mol_buffer) > self.last_log:
                 self.sort_buffer()
                 self.log_intermediate()
                 self.last_log = len(self.mol_buffer)
-                self.save_result(self.task_label)
+                # self.save_result(self.args.run_name)
         return score_list
 
     @property
@@ -216,6 +239,7 @@ class BaseOptimizer:
     def __init__(self, args=None):
         self.model_name = args.mol_lm
         self.args = args
+        print(self.args.run_name, flush=True)
         self.n_jobs = args.n_jobs
         # self.pool = joblib.Parallel(n_jobs=self.n_jobs)
         self.smi_file = args.smi_file
@@ -223,8 +247,15 @@ class BaseOptimizer:
         if self.smi_file is not None:
             self.all_smiles = self.load_smiles_from_file(self.smi_file)
         else:
-            data = MolGen(name = 'ZINC')
-            self.all_smiles = data.get_data()['smiles'].tolist()
+            # data = MolGen(name = 'ZINC')
+            # print(data)
+            # self.all_smiles = data.get_data()['smiles'].tolist()
+            self.all_smiles = []
+            with open("data/RAG_sample.txt", "r") as file:
+                for line in file:
+                    ligand = line[:-1]
+                    self.all_smiles.append(ligand)
+
 
         self.sa_scorer = tdc.Oracle(name = 'SA')
         self.diversity_evaluator = tdc.Evaluator(name = 'Diversity')
@@ -234,19 +265,24 @@ class BaseOptimizer:
     #     with open(file_name) as f:
     #         return self.pool(delayed(canonicalize)(s.strip()) for s in f)
 
-    def sanitize(self, mol_list):
+    def sanitize(self, mol_list, score_list=None):
         new_mol_list = []
+        new_score_list = []
         smiles_set = set()
-        for mol in mol_list:
+        for idx, mol in enumerate(mol_list):
             if mol is not None:
                 try:
-                    smiles = Chem.MolToSmiles(mol)
+                    smiles = Chem.MolToSmiles(mol, canonical=True)
                     if smiles is not None and smiles not in smiles_set:
                         smiles_set.add(smiles)
                         new_mol_list.append(mol)
+                        if score_list: new_score_list.append(score_list[idx])
                 except ValueError:
                     print('bad smiles')
-        return new_mol_list
+        if score_list:
+            return new_mol_list, new_score_list
+        else:
+            return new_mol_list
 
     def sort_buffer(self):
         self.oracle.sort_buffer()
@@ -283,7 +319,7 @@ class BaseOptimizer:
         if suffix is None:
             output_file_path = os.path.join(self.args.output_dir, 'results.yaml')
         else:
-            output_file_path = os.path.join(self.args.output_dir, 'results_' + suffix + '.yaml')
+            output_file_path = os.path.join(self.args.output_dir, 'results/' + suffix + '.yaml')
 
         self.sort_buffer()
         with open(output_file_path, 'w') as f:
@@ -330,10 +366,11 @@ class BaseOptimizer:
         torch.manual_seed(seed)
         random.seed(seed)
         self.seed = seed
-        self.oracle.task_label = self.args.mol_lm + "_" + oracle.name + "_" + str(seed)
+        # self.oracle.task_label = self.args.mol_lm + "_" + oracle.name + "_" + str(seed)
         self._optimize(oracle, config)
         if self.args.log_results:
             self.log_result()
-        self.save_result(self.args.mol_lm + "_" + oracle.name + "_" + str(seed))
+        run_name = self.args.run_name + "_" + str(seed) if seed!=0 else self.args.run_name
+        self.save_result(run_name)
         self.reset()
 

@@ -18,16 +18,17 @@ def main():
     parser.add_argument('--config_tune', default='hparams_tune.yaml')
     parser.add_argument('--pickle_directory', help='Directory containing pickle files with the distribution statistics', default=None)
     parser.add_argument('--n_jobs', type=int, default=-1)
-    parser.add_argument('--output_dir', type=str, default=None)
-    parser.add_argument('--mol_lm', type=str, default=None, choices=[None, "BioT5", "MoleculeSTM", "GPT-4"])
+    parser.add_argument('--output_dir', type=str, default=".")
+    parser.add_argument('--mol_lm', type=str, default=None, choices=[None, "BioT5", "MoleculeSTM", "GPT-4", "custom"])
     parser.add_argument('--bin_size', type=int, default=100)
     parser.add_argument('--patience', type=int, default=5)
-    parser.add_argument('--max_oracle_calls', type=int, default=10000)
-    parser.add_argument('--freq_log', type=int, default=100)
+    parser.add_argument('--max_oracle_calls', type=int, default=1000)
+    parser.add_argument('--freq_log', type=int, default=10)
     parser.add_argument('--seed', type=int, nargs="+", default=[0])
     parser.add_argument('--oracles', nargs="+", default=["qed"]) ###
     parser.add_argument('--log_results', action='store_true')
     parser.add_argument('--log_dir', default="./results")
+    parser.add_argument('--run_name', required=True)
     args = parser.parse_args()
 
 
@@ -60,14 +61,12 @@ def main():
             config_default = yaml.safe_load(open(args.config_default))
         except:
             config_default = yaml.safe_load(open(os.path.join(path_main, args.config_default)))
-        oracle = Oracle(name = oracle_name)
-        optimizer = Optimizer(args=args)
         print(config_default)
-
-
 
         for seed in args.seed:
             print('seed', seed)
+            oracle = oracle_name
+            optimizer = Optimizer(args=args)
             optimizer.optimize(oracle=oracle, config=config_default, seed=seed)
 
 

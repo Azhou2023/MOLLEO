@@ -55,7 +55,7 @@ def obtain_rings(smi):
     
     bond_idx = get_bond_indeces(mol, rot)
     new_mol = Chem.FragmentOnBonds(mol, bond_idx, addDummies=False) 
-    new_smile = Chem.MolToSmiles(new_mol)
+    new_smile = Chem.MolToSmiles(new_mol, canonical=True)
     
     smile_split_list = new_smile.split(".") 
     ring_smiles = []

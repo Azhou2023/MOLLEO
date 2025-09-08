@@ -1,3 +1,3 @@
-population_size: 120
+population_size: 5
 offspring_size: 70
 mutation_rate: 0.067

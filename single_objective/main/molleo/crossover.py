@@ -159,7 +159,7 @@ def crossover_non_ring(parent_A, parent_B):
 
 
 def crossover(parent_A, parent_B):
-    parent_smiles = [Chem.MolToSmiles(parent_A), Chem.MolToSmiles(parent_B)]
+    parent_smiles = [Chem.MolToSmiles(parent_A, canonical=True), Chem.MolToSmiles(parent_B, canonical=True)]
     try:
         Chem.Kekulize(parent_A, clearAromaticFlags=True)
         Chem.Kekulize(parent_B, clearAromaticFlags=True)
@@ -172,14 +172,14 @@ def crossover(parent_A, parent_B):
             # print 'non-ring crossover'
             new_mol = crossover_non_ring(parent_A, parent_B)
             if new_mol is not None:
-                new_smiles = Chem.MolToSmiles(new_mol)
+                new_smiles = Chem.MolToSmiles(new_mol, canonical=True)
                 if new_smiles is not None and new_smiles not in parent_smiles:
                     return new_mol
         else:
             # print 'ring crossover'
             new_mol = crossover_ring(parent_A, parent_B)
             if new_mol is not None:
-                new_smiles = Chem.MolToSmiles(new_mol)
+                new_smiles = Chem.MolToSmiles(new_mol, canonical=True)
                 if new_smiles is not None and new_smiles not in parent_smiles:
                     return new_mol
 

@@ -10,6 +10,7 @@ class BioT5:
         self.model = T5ForConditionalGeneration.from_pretrained('QizhiPei/biot5-base-text2mol')
 
         self.task2description = {
+                'c-met': 'Definition: You are given a molecule SELFIES. Your job is to generate a SELFIES molecule that is a greater inhibitor of c-MET.\n\n',
                 'qed': 'Definition: You are given a molecule SELFIES. Your job is to generate a SELFIES molecule that looks more like a drug.\n\n',
                 'jnk3': 'Definition: You are given a molecule SELFIES. Your job is to generate a SELFIES molecule that is a greater inhibitor of JNK3.\n\n',
                 'drd2': 'Definition: You are given a molecule SELFIES. Your job is to generate a SELFIES molecule that inhibits DRD2 more.\n\n',
