@@ -82,18 +82,9 @@ class Custom_LLM:
         parent_mol = [t[1] for t in parent]
         parent_scores = [t[0] for t in parent]
         try:
-            if self.current_summary:
-                # task_definition = f'We will collaborate on generating a ligand that can bind to kinase {protein} with high binding affinity. Provided below is a description of common knowledge of strong binders to the target:\n\n'
-                # prompt = task_definition + self.initial_context +"\n"
-                # task_definition = f'\nAdditionally, here is a summary of our own current accumulated knowledge about the target based on our past trials:\n\n'
-                # prompt += task_definition + self.current_summary + "\n" 
-                
-                task_definition = f'We will collaborate on generating a ligand that can bind to the kinase c-MET with high binding affinity. Provided below is our current accumulated knowledge about the target:\n\n'
-                prompt = task_definition + self.current_summary + "\n" 
-            else:
-                task_definition = f'We will collaborate on generating a ligand that can bind to kinase {protein} with high binding affinity. Provided below is a description of our current knowledge of strong binders to the target:\n\n'
-                prompt = task_definition + self.initial_context +"\n"
-            mol_tuple = f'\nAlso provided are two existing molecules and their binding affinities to {protein}:\n'
+            
+            prompt = f'We will collaborate on generating a ligand for {protein} with high binding affinity. I will give you the output from docking software after each of your attempts. Assume that there are always more improvements to be made to the current ligand.\n'
+            mol_tuple = f'Provided are two existing molecules and their binding affinities to {protein}:\n'
             for i in range(2):
                 tu = '[' + Chem.MolToSmiles(parent_mol[i], canonical=True) + ',' + str(-parent_scores[i]) + ']\n'
                 mol_tuple = mol_tuple + tu
@@ -122,12 +113,12 @@ class Custom_LLM:
             score = self.oracle(proposed_smiles)
             new_child = Chem.MolFromSmiles(proposed_smiles)
             
-            messages.append({"role": "assistant", "content": r})
-            summary_prompt = "Software shows that the ligand you generated ("+proposed_smiles+") had a binding affinity of "+str(-score)+" kcal/mol.\n"
-            summary_prompt += "Based on this docking result, update our current accumulated knowledge about the protein target. Briefly summarize the most important details and information about the binding target that we've learned so far. Describe what has been effective and what has not. Do NOT generate any new molecules at this time."
-            messages.append({"role": "user", "content": summary_prompt})
-            summary = query_LLM(self.model, self.tokenizer, self.device, messages)
-            self.current_summary = summary.replace("assistant\n\n", "")
+            # messages.append({"role": "assistant", "content": r})
+            # summary_prompt = "Software shows that the ligand you generated ("+proposed_smiles+") had a binding affinity of "+str(-score)+" kcal/mol.\n"
+            # summary_prompt += "Based on this docking result, update our current accumulated knowledge about the protein target. Briefly summarize the most important details and information about the binding target that we've learned so far. Describe what has been effective and what has not. Do NOT generate any new molecules at this time."
+            # messages.append({"role": "user", "content": summary_prompt})
+            # summary = query_LLM(self.model, self.tokenizer, self.device, messages)
+            # self.current_summary = summary.replace("assistant\n\n", "")
 
             return (new_child, score)
         except Exception as e:
@@ -145,12 +136,13 @@ class Custom_LLM:
                 score = self.oracle(smiles)
                 new_child = Chem.MolFromSmiles(smiles)
                 
-                messages.append({"role": "assistant", "content": smiles})
-                summary_prompt = "Software shows that the ligand "+smiles+" has a binding affinity of "+str(-score)+" kcal/mol.\n"
-                summary_prompt += "Based on this docking result, update our current accumulated knowledge about the protein target. Briefly summarize the most important details and information about the binding target that we've learned so far. Describe what has been effective and what has not. Do NOT generate any new molecules at this time."
-                messages.append({"role": "user", "content": summary_prompt})
-                summary = query_LLM(self.model, self.tokenizer, self.device, messages)
-                self.current_summary = summary.replace("assistant\n\n", "")
+                # messages.append({"role": "assistant", "content": smiles})
+                # summary_prompt = "Software shows that the ligand "+smiles+" has a binding affinity of "+str(-score)+" kcal/mol.\n"
+                # summary_prompt += "Based on this docking result, update our current accumulated knowledge about the protein target. Briefly summarize the most important details and information about the binding target that we've learned so far. Describe what has been effective and what has not. Do NOT generate any new molecules at this time."
+                # messages.append({"role": "user", "content": summary_prompt})
+                # summary = query_LLM(self.model, self.tokenizer, self.device, messages)
+                # self.current_summary = summary.replace("assistant\n\n", "")
+                
             return (new_child, score)
 
 

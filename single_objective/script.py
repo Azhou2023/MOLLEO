@@ -126,7 +126,7 @@ def analyze_results(run_name, bindingdb=True, llm_only=True):
     for idx, ligand in enumerate(c):
         if ligands[ligand] < threshold:
             num_better_than_threshold += 1
-        if idx < 10:
+        if idx < 0:
             mol = Chem.MolFromSmiles(ligand)
             qed_score = QED.qed(mol)
             qed.append(qed_score)
@@ -149,7 +149,7 @@ def analyze_results(run_name, bindingdb=True, llm_only=True):
     print("NUM BETTER THAN THRESHOLD: " + str(num_better_than_threshold))
     return best_10_cluster
 # get_all_ligands()
-# values1 = analyze_results("GPT-4_c-met_boltz", bindingdb=True, llm_only=False)
+# values1 = analyze_results("custom_c-met_no_summary_sft", bindingdb=True, llm_only=True)
 # values2 = analyze_results("custom_c-met_untuned_llama", bindingdb=True, llm_only=True)
 # _, p = ttest_ind(values1, values2, alternative="less", equal_var=False)
 # print(p)

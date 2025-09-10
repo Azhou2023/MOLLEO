@@ -81,7 +81,8 @@ class GB_GA_Optimizer(BaseOptimizer):
         if args.mol_lm == "GPT-4":
             self.mol_lm = GPT4(self.oracle)
         elif args.mol_lm == "custom":
-            model_path = "/home/ubuntu/LLaMA-Factory/output/llama3_8b_sft"
+            model_path = "/home/ubuntu/LLaMA-Factory/output/llama3_sft_ppo_1200"
+            # model_path = "meta-llama/Llama-3.1-8B-Instruct"
             print("Model: " + model_path)
             self.mol_lm = Custom_LLM(model_path, self.oracle)
         elif args.mol_lm == "BioT5":
