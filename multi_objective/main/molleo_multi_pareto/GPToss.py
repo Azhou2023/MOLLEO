@@ -1117,10 +1117,9 @@ def run_agent(
     ]
     
     modification_tools = ["add_atom", "replace_atom", "add_functional_group", "add_substructure", "remove_substructure", "replace_substructure", "crossover_molecules"]
-
     should_break = False
     for step in range(max_steps):
-        # print(f"\n[Index {str(index)}] CURRENT MESSAGES: {str(messages)}\n", flush=True)
+        print(f"\n[Index {str(index)}] CURRENT MESSAGES: {str(messages)}\n", flush=True)
         response = client.responses.create(
             model='gpt-oss-120b',
             input=messages,
@@ -1129,7 +1128,7 @@ def run_agent(
         
         for msg in response.output:
             if msg.type == "reasoning":
-                print(f"\n[Index {str(index)}] [Reasoning]: {msg.content}") 
+                print(f"[Index {str(index)}] [Reasoning]: {msg.content}") 
             elif msg.type == "function_call":
                 print(f"[Index {str(index)}] [Tool Call]: {msg}")
                 

@@ -321,33 +321,21 @@ def analyze_results(run_name, limit=False, llm_only=True, eval_sim=False, num_se
 # create_yaml("GPT-4_c-met_zinc")
 # set_similarity()
 
-pattern = re.compile(r'^results_(.*)_(\d+)\.yaml$')
-fallback_pattern = re.compile(r'^results_(.*)\.yaml$')
 home_path = "/home/ubuntu/MOLLEO/multi_objective/results"
-files = [f for f in os.listdir(home_path) if f.endswith('.yaml')]
+subdirectories = [f for f in os.listdir(home_path) if os.path.isdir(os.path.join(home_path, f))]
 
-for filename in files:
-    match = pattern.match(filename)
-    
-    if match:
-        run_name = match.group(1)
-        seed_num = match.group(2)
-        new_filename = f"seed_{seed_num}.yaml"
-    else:
-        fallback_match = fallback_pattern.match(filename)
-        if fallback_match:
-            run_name = fallback_match.group(1)
-            new_filename = "seed_0.yaml"
-        else:
-            # Skip any yaml files that don't start with 'results_' just to be safe
-            continue
-        
-    os.makedirs(os.path.join(home_path, run_name), exist_ok=True)
-    
-    # Define old and new file paths
-    old_path = filename
-    new_path = os.path.join(run_name, new_filename)
-    
-    # Move and rename the file
-    shutil.move(old_path, new_path)
-    print(f"Moved: {old_path} -> {new_path}")
+for subdir in subdirectories:
+    for filename in os.listdir(os.path.join(home_path, subdir)):
+        new_buffer = {}
+        with open(os.path.join(home_path, subdir, filename), 'r') as file:
+            data = yaml.safe_load(file)
+            for smiles in data:
+                if len(data[smiles]==4):
+                    break
+                mol = Chem.MolFromSmiles(smiles)
+                qed = QED.qed(mol)
+                sa = sascorer.calculateScore(mol)
+                
+                new_buffer[smiles] = data[smiles, data[smiles][1], qed, sa]
+        with open(os.path.join(home_path, subdir, filename), 'w') as f:
+            yaml.dump(new_buffer, f, sort_keys=False)

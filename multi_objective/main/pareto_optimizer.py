@@ -106,12 +106,12 @@ def get_ready_pod_count(namespace, deployment_name):
         
         return ready_count
 
-    except client.exceptions.ApiException as e:
+    except Exception as e:
         if e.status == 404:
             print(f"Error: Deployment '{deployment_name}' not found in namespace '{namespace}'.")
         else:
             print(f"API Error: {e}")
-        return 0
+        return -1
 
 def calculate_boltz_nautilus(protein_name, ligand_smiles, idx):
     print(f"\n[Worker {str(idx)}] Sending job for {ligand_smiles}...", flush=True)
@@ -259,10 +259,16 @@ class Oracle:
         
         procs = []
         num_nautilus = get_ready_pod_count("spatiotemporal-decision-making", "andrew-boltz-api")
+        if use_nautilus and num_nautilus == -1:
+            num_nautilus = 20
+            
         num_workers = 0
         num_workers += num_gpus if use_local else 0
         num_workers += num_nautilus if use_nautilus else 0
         print(f"{str(num_workers)} workers available ({str(num_gpus)} local, {str(num_nautilus)} on Nautilus)")
+        if num_workers == 0:
+            print("No workers available!")
+            sys.exit(1)
         for gpu_id in range(num_workers):
             p = ctx.Process(target=gpu_worker, args=(gpu_id, task_q, result_q, self.max_evaluator, self.min_evaluator, self.boltz_cache))
             p.start()
