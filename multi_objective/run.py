@@ -35,6 +35,7 @@ def main():
     parser.add_argument('--starting', default="zinc")
     parser.add_argument('--single_parent', action='store_true')
     parser.add_argument('--use_tools', action='store_true')
+    parser.add_argument('--oracle', type=str, default='boltz', choices=["boltz", "docking"])
     parser.add_argument('--weighted_obj', action='store_true')
     args = parser.parse_args()
 
@@ -88,13 +89,13 @@ def main():
     os.makedirs(directory_path, exist_ok=True)
     args.output_dir = directory_path
 
-    optimizer = Optimizer(args=args)
     print(config_default)
 
 
     for seed in args.seed:
+        optimizer = Optimizer(args=args, config=config_default)
         print('seed', seed)
-        optimizer.optimize(config=config_default, seed=seed)
+        optimizer.optimize(seed=seed)
 
 
 

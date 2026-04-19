@@ -3,6 +3,7 @@ from __future__ import print_function
 from concurrent.futures import ThreadPoolExecutor
 import random
 from typing import List
+import math
 
 import joblib
 import numpy as np
@@ -36,19 +37,28 @@ def make_mating_pool(population_smiles: List[Mol], population_scores, pareto_tab
     # scores -> probs
     all_tuples = list(zip(population_scores, population_smiles))
     
-    # prob distribution
+    # uniform distribution
     # population_scores = [s + MINIMUM for s in population_scores]
     # sum_scores = sum(population_scores)
     # population_probs = [p / sum_scores for p in population_scores]
-    # print(len(all_tuples))
-    # print(len(population_probs))
+    # print(all_tuples)
+    # print(population_probs)
     # mating_indices = np.random.choice(len(all_tuples), p=population_probs, size=offspring_size, replace=True)
     
+    # exponential prob
+    population_scores = [math.pow(10, s + MINIMUM) for s in population_scores]
+    sum_scores = sum(population_scores)
+    population_probs = [p / sum_scores for p in population_scores]
+    print(population_scores)
+    print(population_probs)
+    mating_indices = np.random.choice(len(all_tuples), p=population_probs, size=offspring_size, replace=True)
+    
+    
     # rank selection
-    weights = [1/(1+pareto_table[x]) for x in population_smiles]
-    summation = sum(weights)
-    weights = [w/summation for w in weights]
-    mating_indices = np.random.choice(len(all_tuples), size=offspring_size, p=weights, replace=True)
+    # weights = [1/(1+pareto_table[x]) for x in population_smiles]
+    # summation = sum(weights)
+    # weights = [w/summation for w in weights]
+    # mating_indices = np.random.choice(len(all_tuples), size=offspring_size, p=weights, replace=True)
     
     mating_tuples = [all_tuples[indice] for indice in mating_indices]
     return mating_tuples
@@ -78,7 +88,7 @@ def get_best_mol(population_scores, population_mol):
 
 class GB_GA_Optimizer(BaseOptimizer):
 
-    def __init__(self, args=None):
+    def __init__(self, args=None, config=None):
         super().__init__(args)
         self.model_name = "molleo"
 
@@ -91,6 +101,7 @@ class GB_GA_Optimizer(BaseOptimizer):
             self.mol_lm = BioT5()
         
         self.args = args
+        self.config = config
         lm_name = "baseline"
         if args.mol_lm != None:
             lm_name = args.mol_lm
@@ -102,15 +113,17 @@ class GB_GA_Optimizer(BaseOptimizer):
 
         pool = joblib.Parallel(n_jobs=self.n_jobs)
         
-        if self.smi_file is not None:
-            # Exploitation run
-            starting_population = self.all_smiles[:config["population_size"]]
+    
+        # Exploration run
+        print(f"{str(len(self.all_smiles))} total SMILES")
+        if self.args.starting == "zinc":
+            population_smiles = list(np.random.choice(self.all_smiles, config["population_size"], replace=True))
         else:
-            # Exploration run
-            starting_population = list(np.random.choice(self.all_smiles, config["population_size"]))
+            population_smiles = list(np.random.choice(self.all_smiles, config["population_size"], replace=False))
+
+        print(f"{str(len(population_smiles))} SMILES selected")
 
         # select initial population
-        population_smiles = starting_population
         print("Before sanitation: " + str(len(population_smiles)))
         population_smiles = self.sanitize(population_smiles)
         print("After sanitation: " + str(len(population_smiles)))
@@ -136,11 +149,11 @@ class GB_GA_Optimizer(BaseOptimizer):
             fp_scores = []
             offspring_mol_temp = []
             if self.args.mol_lm == 'GPT-4' or self.args.mol_lm == "GPT-oss":
-                with ThreadPoolExecutor(max_workers=config["offspring_size"]) as pool:
-                    inputs = [(idx, mating_tuples, config["mutation_rate"], self.oracle.min_evaluator, self.oracle.max_evaluator, self.oracle.boltz_cache, self.args.single_parent, self.args.use_tools) for idx in range(config["offspring_size"])]
+                with ThreadPoolExecutor(max_workers=min(config["offspring_size"], 12)) as pool:
+                    inputs = [(idx, mating_tuples, config["mutation_rate"], self.oracle.min_evaluator, self.oracle.max_evaluator, self.oracle.affin_cache, self.args.single_parent, self.args.use_tools) for idx in range(config["offspring_size"])]
                     offspring_smiles = list(pool.map(lambda x: self.mol_lm.edit(*x), inputs))
                     
-                # offspring_smiles = [self.mol_lm.edit(mating_tuples, config["mutation_rate"], self.oracle.min_evaluator, self.oracle.max_evaluator, self.oracle.boltz_cache, single_parent=self.args.single_parent) for _ in range(config["offspring_size"])]
+                # offspring_smiles = [self.mol_lm.edit(mating_tuples, config["mutation_rate"], self.oracle.min_evaluator, self.oracle.max_evaluator, self.oracle.affin_cache, single_parent=self.args.single_parent) for _ in range(config["offspring_size"])]
             elif self.args.mol_lm == 'BioT5':
                 top_smi = get_best_mol(population_scores, population_smiles) 
 
@@ -182,12 +195,10 @@ class GB_GA_Optimizer(BaseOptimizer):
             print("Population size: " + str(len(population_smiles)))
             
             if not self.args.weighted_obj:
-                pareto_smiles = self.oracle.select_pareto_front(population_smiles)
+                population_smiles = list(self.oracle.select_pareto_front(population_smiles))
                 pareto_table = {}
-                for idx, smiles_set in enumerate(pareto_smiles):
-                    for smiles in smiles_set:
-                        pareto_table[smiles] = idx
-                population_smiles = list(np.concatenate(pareto_smiles))
+                for idx, smiles in enumerate(population_smiles):
+                    pareto_table[smiles] = idx
                 population_scores = self.oracle(population_smiles)
                 population_tuples = list(zip(population_scores, population_smiles))
                 population_tuples = sorted(population_tuples, key=lambda x: x[0], reverse=True)
@@ -201,20 +212,20 @@ class GB_GA_Optimizer(BaseOptimizer):
             print("Population Scores: " + str(population_scores))
 
             ### early stopping
-            if len(self.oracle) > 1:
-                self.sort_buffer()
-                new_score = np.mean([item[1][0] for item in list(self.mol_buffer.items())])
-                # import ipdb; ipdb.set_trace()
-                if (new_score - old_score) < 1e-3:
-                    patience += 1
-                    if patience >= self.args.patience:
-                        self.log_intermediate(finish=True)
-                        print('convergence criteria met')
-                        # break
-                else:
-                    patience = 0
+            # if len(self.oracle) > 1:
+            #     self.sort_buffer()
+            #     new_score = np.mean([item[1][0] for item in list(self.mol_buffer.items())])
+            #     # import ipdb; ipdb.set_trace()
+            #     if (new_score - old_score) < 1e-3:
+            #         patience += 1
+            #         if patience >= self.args.patience:
+            #             self.log_intermediate(finish=True)
+            #             print('convergence criteria met')
+            #             # break
+            #     else:
+            #         patience = 0
 
-                old_score = new_score
+            #     old_score = new_score
             
             print("Length of buffer: " + str(len(self.oracle.mol_buffer)))
             print("Max oracle calls: " + str(self.oracle.max_oracle_calls))

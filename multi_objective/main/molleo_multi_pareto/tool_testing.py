@@ -27,7 +27,10 @@ import sascorer
 load_dotenv()
 
 # client = OpenAI(api_key=os.getenv("GPT_KEY"))
-client = OpenAI(base_url="https://gpt-oss-120b-svarambally.nrp-nautilus.io/v1", api_key=os.getenv("OSS_KEY"))
+client = OpenAI(base_url="https://gpt-oss-120b-andrew.nrp-nautilus.io/v1", api_key=os.getenv("OSS_KEY"))
+# client = OpenAI(base_url = "https://ellm.nrp-nautilus.io/v1",
+#                 api_key=os.getenv("NAUTILUS_KEY"))
+
 
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Crippen, rdMolDescriptors
@@ -1177,34 +1180,35 @@ def run_agent(
 
 if __name__ == "__main__":
     
-    # state = run_agent(
-    #     initial_smiles=["CCc1nc2ccc(Cl)cn2c1C(=O)NN=Cc1c(OC)cc(OC)c(NC)c1F", "Cc1cc(F)c(OCC(=O)NC(=O)C2(C)CCN(c3ccncc3F)CC2)c(C)c1F"],
-    #     prompt="I have given you two candidate ligands. Please propose a new molecule that binds better to c-MET. Only make a few modifications (at most 3), then respond with FINAL_ANSWER.\n"
-    # )
+    state = run_agent(
+        initial_smiles=["CCc1nc2ccc(Cl)cn2c1C(=O)NN=Cc1c(OC)cc(OC)c(NC)c1F", "Cc1cc(F)c(OCC(=O)NC(=O)C2(C)CCN(c3ccncc3F)CC2)c(C)c1F"],
+        prompt="I have given you two candidate ligands. Please propose a new molecule that binds better to c-MET. Only make a few modifications (at most 3), then respond with FINAL_ANSWER.\n"
+        # prompt="Use the provided tools to make modifications to the ligands. Do NOT make changes without calling the tools."
+    )
 
-    # print("Final SMILES:", state.current_smiles)
-    # print("Final Answer:", state.final_answer)
-    # print("Steps taken:", len(state.history))
+    print("Final SMILES:", state.current_smiles)
+    print("Final Answer:", state.final_answer)
+    print("Steps taken:", len(state.history))
     
     
-    mol = mol_from_smiles("O=C(O[NH2+]C[C@@H]1CCO[C@H]1c1ccc2ccccc2n1)c1cc([N+](=O)[O-])ccc1N1CCOCC1")
-    centralities = compute_atom_centralities(mol)
+    # mol = mol_from_smiles("COc1ccc(F)c(Cl)c1-c1nc(Nc2ccc(C(=O)N3CCCC3)cc2)ncc1C(N)=O")
+    # centralities = compute_atom_centralities(mol)
 
-    for atom in mol.GetAtoms():
-        idx = atom.GetIdx()
-        c = centralities[idx]
+    # for atom in mol.GetAtoms():
+    #     idx = atom.GetIdx()
+    #     c = centralities[idx]
 
-        label = f"{c:.2f}"
-        atom.SetProp("atomNote", label)
+    #     label = f"{c:.2f}"
+    #     # atom.SetProp("atomNote", label)
 
-    # MolDraw2DCairo gives crisp PNGs and respects atomNote
-    drawer = rdMolDraw2D.MolDraw2DCairo(1000, 1000)
-    opts = drawer.drawOptions()
-    opts.annotationFontScale = 0.55   # scale note text relative to atom labels
-    opts.addAtomIndices = True         # also show atom indices for cross-referencing
+    # # MolDraw2DCairo gives crisp PNGs and respects atomNote
+    # drawer = rdMolDraw2D.MolDraw2DCairo(1000, 1000)
+    # opts = drawer.drawOptions()
+    # opts.annotationFontScale = 0.55   # scale note text relative to atom labels
+    # opts.addAtomIndices = False         # also show atom indices for cross-referencing
 
-    drawer.DrawMolecule(mol)
-    drawer.FinishDrawing()
+    # drawer.DrawMolecule(mol)
+    # drawer.FinishDrawing()
 
-    img = Image.open(io.BytesIO(drawer.GetDrawingText()))
-    img.save("/home/ubuntu/MOLLEO/multi_objective/main/molleo_multi_pareto/ligand_centrality.png")
+    # img = Image.open(io.BytesIO(drawer.GetDrawingText()))
+    # img.save("/home/ubuntu/MOLLEO/multi_objective/main/molleo_multi_pareto/ligand_centrality.png")

@@ -30,7 +30,7 @@ def butina(fingerprints):
            similaridade = DataStructs.TanimotoSimilarity(fingerprints[i], fingerprints[j])
            matrix.append(1 - similaridade)
 
-   clusters = Butina.ClusterData(data=matrix, nPts=len(fingerprints), distThresh=0.5, isDistData=True)
+   clusters = Butina.ClusterData(data=matrix, nPts=len(fingerprints), distThresh=0.6, isDistData=True)
    clusters = sorted(clusters, key=len, reverse=True)
 
    return clusters

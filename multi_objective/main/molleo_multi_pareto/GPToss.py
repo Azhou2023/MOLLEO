@@ -27,7 +27,11 @@ import sascorer
 load_dotenv()
 
 # client = OpenAI(api_key=os.getenv("GPT_KEY"))
-client = OpenAI(base_url="https://gpt-oss-120b-svarambally.nrp-nautilus.io/v1", api_key=os.getenv("OSS_KEY"))
+client = OpenAI(base_url="https://gpt-oss-120b-andrew.nrp-nautilus.io/v1",
+                api_key=os.getenv("OSS_KEY"))
+
+# client = OpenAI(base_url="https://ellm.nrp-nautilus.io/v1",
+#                 api_key=os.getenv("NAUTILUS_KEY"))
 
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Crippen, rdMolDescriptors
@@ -1190,7 +1194,7 @@ def run_agent(
 
 def query_LLM(messages, index):
     response = client.responses.create(
-        model='gpt-oss-120b',
+        model='gpt-oss',
         input=messages,
     )
         
@@ -1205,7 +1209,7 @@ def query_LLM(messages, index):
 class GPToss:
     def __init__(self):
         self.task2description = {
-                'c-met': 'I have two molecules and their docking scores to c-MET. The docking score measures how well a molecule binds to c-MET. A lower docking score generally indicates a stronger or more favorable binding affinity.\n\n',
+                'c-met': 'I have two molecules and their QED, SA (Synthetic Accessibility), c-MET (docking scores to the kinase c-MET) scores. The docking score measures how well a molecule binds to c-MET. A lower docking score generally indicates a stronger or more favorable binding affinity.\n\n',
                 'brd4': 'I have two molecules and their docking scores to BRD4. The docking score measures how well a molecule binds to BRD4. A lower docking score generally indicates a stronger or more favorable binding affinity.\n\n',
                 'qed': 'I have two molecules and their QED scores. The QED score measures the drug-likeness of the molecule.\n\n',
                 'jnk3': 'I have two molecules and their JNK3 scores. The JNK3 score measures a molecular\'s biological activity against JNK3.\n\n',
@@ -1239,7 +1243,7 @@ class GPToss:
         self.error_count = 0
         self.current_summary = ""
 
-    def edit(self, idx, mating_tuples, mutation_rate, min_evaluators, max_evaluators, boltz_cache, single_parent=False, use_tools=False):
+    def edit(self, idx, mating_tuples, mutation_rate, min_evaluators, max_evaluators, affin_cache, single_parent=False, use_tools=False):
         task = self.task
         all_objectives = min_evaluators + max_evaluators
         obj_map = {"qed": "QED", "sa": "SA (Synthetic Accessibility)", "c-met": "Binding Affinity against the kinase c-MET", "brd4": "Binding Affinity against BRD4"}
@@ -1284,7 +1288,8 @@ class GPToss:
                 # objective=f"{task_objective} Only make a few (at most 3) modifications, then respond with FINAL_ANSWER. Do not let molecular weight exceed 700.\n"
 
                 #crossovers (2 input molecules)
-                objective=f"{task_objective} I have given you two candidate ligands. Please propose a new molecule that binds better to c-MET. You are encouraged to make a crossover between the molecules on the first step, then mutate the resulting molecule. Only make a few modifications (at most 3), then respond with FINAL_ANSWER. Do not let molecular weight exceed 700.\n"
+                if "c-MET" in task_objective: objective=f"{task_objective} I have given you two candidate ligands. Please propose a new molecule that binds better to c-MET. You are encouraged to make a crossover between the candidate molecules on the first step, then mutate the resulting molecule. Only make a few modifications (at most 3), then respond with FINAL_ANSWER. Do not let molecular weight exceed 700.\n"
+                if "BRD4" in task_objective: objective=f"{task_objective} I have given you two candidate ligands. Please use the provided tools to generate a new molecule that binds better to BRD4. You are encouraged to make a crossover between the candidate molecules on the first step, then mutate the resulting molecule. Only make a few modifications (at most 3), then respond with FINAL_ANSWER. Do not let molecular weight exceed 700.\n"
                 mol_tuple = ''
                 for i in range(len(parent)):
                     smiles = parent_smiles[i]
@@ -1293,7 +1298,7 @@ class GPToss:
                         tu += obj_map[obj[0]]
                         tu+= ": "
                         if obj[0] == "c-met" or obj[0] == "brd4":
-                            score = round(boltz_cache[obj[0]][smiles], 2)
+                            score = round(affin_cache[obj[0]][smiles], 2)
                         else:    
                             mol = Chem.MolFromSmiles(smiles)
                             score = round(obj[1](mol), 2)
@@ -1353,7 +1358,7 @@ class GPToss:
                 #         tu += obj_map[obj[0]]
                 #         tu+= ": "
                 #         if obj[0] == "c-met" or obj[0] == "brd4":
-                #             score = round(boltz_cache[obj[0]][smiles], 2)
+                #             score = round(affin_cache[obj[0]][smiles], 2)
                 #         else:    
                 #             mol = Chem.MolFromSmiles(smiles)
                 #             score = round(obj[1](mol), 2)
@@ -1394,6 +1399,7 @@ class GPToss:
             print("NUM LLM ERRORS: " + str(self.error_count), flush=True)
             score = 0
             new_child = co.crossover(Chem.MolFromSmiles(parent_smiles[0]), Chem.MolFromSmiles(parent_smiles[1]))
+            smiles = ""
             if new_child is not None:
                 new_child = mu.mutate(new_child, mutation_rate)
             if new_child is not None: 
