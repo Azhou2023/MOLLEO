@@ -1,5 +1,13 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+import hashlib
 import os
+from pathlib import Path
+import signal
+import tarfile
+import traceback
 import requests
+import urllib
 import yaml
 import random
 import torch
@@ -9,8 +17,8 @@ from rdkit.Chem import Draw
 from rdkit.Chem import QED
 from rdkit.Chem import AllChem
 from rdkit.Chem import DataStructs
-import tdc
-from tdc.generation import MolGen
+# import tdc
+# from tdc.generation import MolGen
 from main.utils.chem import *
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 from .boltz import calculate_boltz
@@ -20,12 +28,323 @@ from queue import Empty
 from kubernetes import client, config
 from .docking import calculate_docking
 
+import tempfile
+import uuid
+
+try:
+    import boto3
+except Exception:
+    boto3 = None
+
+from boltz.main import process_inputs, MOL_URL, CCD_URL
+
 from rdkit.Chem import RDConfig
 sys.path.append(os.path.join(RDConfig.RDContribDir, 'SA_Score'))
 import sascorer
 
 num_gpus = torch.cuda.device_count()
-API_URL = "https://andrew-boltz-api.nrp-nautilus.io/predict_affinity"
+API_URL = os.environ.get("BOLTZ_GATEWAY_URL", "https://boltz-api.nrp-nautilus.io/predict_affinity")
+OFFSPRING_SIZE = int(os.environ.get("NAUTILUS_ORACLE_WORKERS", "20"))
+REQUEST_TIMEOUT_SEC = int(os.environ.get("BOLTZ_REQUEST_TIMEOUT_SEC", "1800"))
+REQUEST_MAX_RETRIES = int(os.environ.get("BOLTZ_REQUEST_MAX_RETRIES", "6"))
+REQUEST_RETRY_BASE_SEC = float(os.environ.get("BOLTZ_REQUEST_RETRY_BASE_SEC", "2"))
+RESULT_QUEUE_POLL_SEC = int(os.environ.get("MOLLEO_RESULT_QUEUE_POLL_SEC", "15"))
+RESULT_STALL_TIMEOUT_SEC = int(os.environ.get("MOLLEO_RESULT_STALL_TIMEOUT_SEC", "600"))
+CLIENT_PREP_TIMEOUT_SEC = int(os.environ.get("BOLTZ_CLIENT_PREP_TIMEOUT_SEC", "180"))
+CLIENT_PREP_MODE = os.environ.get("BOLTZ_CLIENT_PREP_MODE", "1").lower() in ("1", "true", "yes")
+ARTIFACT_BUCKET = os.environ.get("BOLTZ_ARTIFACT_BUCKET") or os.environ.get("S3_BUCKET")
+ARTIFACT_PREFIX = os.environ.get("BOLTZ_ARTIFACT_PREFIX", "molleo-fast-artifacts")
+ARTIFACT_PRESIGN_EXPIRE_SEC = int(os.environ.get("BOLTZ_ARTIFACT_PRESIGN_EXPIRE_SEC", str(24 * 3600)))
+S3_ENDPOINT = os.environ.get("S3_ENDPOINT_URL") or os.environ.get("AWS_ENDPOINT_URL", "")
+S3_REGION = os.environ.get("AWS_REGION", "us-east-1")
+PREP_THREADS = int(os.environ.get("BOLTZ_PREPROCESS_THREADS", "4"))
+MSA_SERVER_URL = os.environ.get("BOLTZ_MSA_SERVER_URL") or os.environ.get(
+    "MSA_PROXY_URL",
+    "http://boltz-msa-proxy.spatiotemporal-decision-making.svc.cluster.local:8000",
+)
+MSA_PAIRING_STRATEGY = os.environ.get("BOLTZ_MSA_PAIRING_STRATEGY", "greedy")
+MAX_MSA_SEQS = int(os.environ.get("BOLTZ_MAX_MSA_SEQS", "8192"))
+USE_MSA_SERVER = os.environ.get("BOLTZ_USE_MSA_SERVER", "1").lower() in ("1", "true", "yes")
+MSA_SERVER_USERNAME = os.environ.get("BOLTZ_MSA_USERNAME")
+MSA_SERVER_PASSWORD = os.environ.get("BOLTZ_MSA_PASSWORD")
+MSA_API_KEY_HEADER = os.environ.get("MSA_API_KEY_HEADER", "X-API-Key")
+MSA_API_KEY_VALUE = os.environ.get("MSA_API_KEY_VALUE")
+MSA_CACHE_PREFIX = os.environ.get("MSA_CACHE_PREFIX", "boltz-msa-cache")
+NIM_MSA_DATABASE = os.environ.get("NIM_MSA_DATABASE", "Uniref30_2302")
+NIM_MSA_TIMEOUT_SEC = int(os.environ.get("NIM_MSA_TIMEOUT_SEC", "180"))
+MOLLEO_BOLTZ_CACHE_DIR = Path(os.environ.get("MOLLEO_BOLTZ_CACHE_DIR", "~/.boltz")).expanduser()
+use_nautilus = True
+use_local = False
+_REQUEST_SESSION = requests.Session()
+if os.environ.get("BOLTZ_USE_ENV_PROXY", "0").lower() not in ("1", "true", "yes"):
+    _REQUEST_SESSION.trust_env = False
+_S3_CLIENT = None
+_ARTIFACT_PAYLOAD_CACHE = {}
+
+POSSIBLE_TARGETS = ["c-met", "brd4", "1com"]
+
+PROTEIN_SEQUENCES = {
+    "c-met": "HIDLSALNPELVQAVQHVVIGPSSLIVHFNEVIGRGHFGCVYHGTLLDNDGKKIHCAVKSLNRITDIGEVSQFLTEGIIMKDFSXPNVLSLLGICLRSEGSPLVVLPYMKHGDLRNFIRNETHNPTVKDLIGFGLQVAKGMKYLASKKFVXRDLAARNCMLDEKFTVKVAXFGLARDMYDKEYYSVXNKTGAKLPVKWMALESLQTQKFTTKSDVWSFGVLLWELMTRGAPPYPDVNTFDITVYLLQGRRLLQPEYCPDPLYEVMLKCWXPKAEMRPSFSELVSRISAIFSTFIG",
+    "brd4": "SHMEQLKCCSGILKEMFAKKHAAYAWPFYKPVDVEALGLHDYCDIIKHPMDMSTIKSKLEAREYRDAQEFGADVRLMFSNCYKYNPPDHEVVAMARKLQDVFEMRFAKM",
+    "1com": "MMIRGIRGATTVERDTEEEILQKTKQLLEKIIEENHTKPEDVVQMLLSATPDLHAVFPAKAVRELSGWQYVPVTCMQEMDVTGGLKKCIRVMMTVQTDVPQDQIRHVYLEKAVVLRPDLSLTKNTEL"
+}
+
+
+class SingleQuoted(str):
+    pass
+
+
+def _sq_representer(dumper, data):
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="'")
+
+
+yaml.add_representer(SingleQuoted, _sq_representer)
+
+
+@dataclass
+class ArtifactPayload:
+    record_id: str
+    artifact_uri: str
+    artifact_sha256: str
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _sha1_text(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()  # noqa: S324
+
+
+def _extract_a3m_sequences(a3m_text: str) -> list[str]:
+    seqs = []
+    for line in a3m_text.splitlines():
+        s = line.strip()
+        if not s or s.startswith(">"):
+            continue
+        seqs.append(s)
+    return seqs
+
+
+def _fetch_proxy_a3m(protein_name: str, sequence: str) -> str:
+    base = (os.environ.get("BOLTZ_MSA_SERVER_URL") 
+            or os.environ.get(
+                "MSA_PROXY_URL",
+                "http://boltz-msa-proxy.spatiotemporal-decision-making.svc.cluster.local:8000",
+                )    
+            or "").strip().rstrip("/")
+    if not base:
+        raise RuntimeError("missing BOLTZ_MSA_SERVER_URL for proxy MSA provider")
+    url = f"{base}/a3m"
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if os.environ.get("MSA_API_KEY_VALUE"):
+        headers[os.environ.get("MSA_API_KEY_HEADER", "X-API-Key")] = os.environ.get("MSA_API_KEY_VALUE")
+    payload = {
+        "protein_name": protein_name,
+        "sequence": sequence,
+        "database": os.environ.get("NIM_MSA_DATABASE", "Uniref30_2302"),
+    }
+    resp = requests.post(url, headers=headers, json=payload, timeout=int(os.environ.get("NIM_MSA_TIMEOUT_SEC", "180")))
+    if resp.status_code != 200:
+        raise RuntimeError(f"MSA proxy request failed: status={resp.status_code} body={resp.text[:500]}")
+    data = resp.json()
+    a3m = (data.get("a3m") or "").strip()
+    if not a3m:
+        raise RuntimeError("MSA proxy response missing a3m")
+    return a3m
+
+
+def _msa_cache_key(protein_name: str, protein_seq: str) -> str:
+    seq_hash = _sha1_text(protein_seq)[:10]
+    prefix = str(os.environ.get("MSA_CACHE_PREFIX", "boltz-msa-cache")).rstrip("/")
+    return f"{prefix}/{protein_name}/proxy/{os.environ.get('NIM_MSA_DATABASE', 'Uniref30_2302')}/{seq_hash}.csv"
+
+
+def _get_or_create_shared_msa_csv(protein_name: str) -> Path | None:
+    if not USE_MSA_SERVER:
+        return None
+    protein_seq = PROTEIN_SEQUENCES.get(protein_name)
+    if not protein_seq:
+        return None
+    key = _msa_cache_key(protein_name, protein_seq)
+    local_dir = MOLLEO_BOLTZ_CACHE_DIR / "msa_cache" / protein_name / "proxy" / NIM_MSA_DATABASE
+    local_dir.mkdir(parents=True, exist_ok=True)
+    local = local_dir / Path(key).name
+    if local.exists():
+        return local
+
+    a3m = _fetch_proxy_a3m(protein_name, protein_seq)
+    seqs = _extract_a3m_sequences(a3m)
+    if not seqs:
+        raise RuntimeError("MSA proxy returned empty alignment")
+    seqs = seqs[: max(1, int(MAX_MSA_SEQS))]
+    with local.open("w") as f:
+        f.write("key,sequence\n")
+        for s in seqs:
+            f.write(f"-1,{s}\n")
+    return local
+
+
+def _ensure_mol_assets(cache_dir: Path) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    mol_dir = cache_dir / "mols"
+    tar_mols = cache_dir / "mols.tar"
+    ccd_pkl = cache_dir / "ccd.pkl"
+    if MOL_URL is None:
+        raise RuntimeError("boltz MOL_URL unavailable; cannot bootstrap mol assets")
+    if not mol_dir.exists():
+        if not tar_mols.exists():
+            urllib.request.urlretrieve(MOL_URL, str(tar_mols))  # noqa: S310
+        with tarfile.open(str(tar_mols), "r") as tar:
+            tar.extractall(cache_dir)  # noqa: S202
+    if not ccd_pkl.exists():
+        if CCD_URL is None:
+            raise RuntimeError("boltz CCD_URL unavailable; cannot bootstrap ccd.pkl")
+        urllib.request.urlretrieve(CCD_URL, str(ccd_pkl))  # noqa: S310
+
+
+def _write_input_yaml(protein_name: str, ligand_smiles: str, out_path: Path, msa_path: str | None = None) -> None:
+    PROTEIN_SEQUENCES = {
+        "c-met": "HIDLSALNPELVQAVQHVVIGPSSLIVHFNEVIGRGHFGCVYHGTLLDNDGKKIHCAVKSLNRITDIGEVSQFLTEGIIMKDFSXPNVLSLLGICLRSEGSPLVVLPYMKHGDLRNFIRNETHNPTVKDLIGFGLQVAKGMKYLASKKFVXRDLAARNCMLDEKFTVKVAXFGLARDMYDKEYYSVXNKTGAKLPVKWMALESLQTQKFTTKSDVWSFGVLLWELMTRGAPPYPDVNTFDITVYLLQGRRLLQPEYCPDPLYEVMLKCWXPKAEMRPSFSELVSRISAIFSTFIG",
+        "brd4": "SHMEQLKCCSGILKEMFAKKHAAYAWPFYKPVDVEALGLHDYCDIIKHPMDMSTIKSKLEAREYRDAQEFGADVRLMFSNCYKYNPPDHEVVAMARKLQDVFEMRFAKM",
+        "1com": "MMIRGIRGATTVERDTEEEILQKTKQLLEKIIEENHTKPEDVVQMLLSATPDLHAVFPAKAVRELSGWQYVPVTCMQEMDVTGGLKKCIRVMMTVQTDVPQDQIRHVYLEKAVVLRPDLSLTKNTEL"
+    }
+
+    protein_seq = PROTEIN_SEQUENCES.get(protein_name)
+    if not protein_seq:
+        raise RuntimeError(f"unsupported protein: {protein_name}")
+    if protein_name == "1com":
+        protein_entry = {"protein": {"id": ["A", "B", "C"], "sequence": protein_seq}}
+    else:
+        protein_entry = {"protein": {"id": "A", "sequence": protein_seq}}
+    
+    if msa_path:
+        protein_entry["protein"]["msa"] = msa_path
+    data = {
+        "version": 1,
+        "sequences": [
+            protein_entry,
+            {"ligand": {"id": "D", "smiles": SingleQuoted(ligand_smiles)}},
+        ],
+        "properties": [{"affinity": {"binder": "D"}}],
+    }
+    with out_path.open("w") as f:
+        yaml.dump(data, f, sort_keys=False)
+
+
+def _get_s3_client():
+    global _S3_CLIENT
+    if _S3_CLIENT is not None:
+        return _S3_CLIENT
+    if boto3 is None:
+        raise RuntimeError("boto3 is missing; install boto3 for client-prep mode")
+    _S3_CLIENT = boto3.client(
+        "s3",
+        endpoint_url=os.environ.get("S3_ENDPOINT_URL") or os.environ.get("AWS_ENDPOINT_URL", "") or None,
+        region_name=os.environ.get("AWS_REGION", "us-east-1",)
+    )
+    return _S3_CLIENT
+
+
+def _prepare_single_artifact(protein_name: str, ligand_smiles: str, experiment_id: str) -> ArtifactPayload:
+    # if process_inputs is None:
+    #     raise RuntimeError("boltz process_inputs unavailable; install boltz in client env")
+    print(os.environ.get("S3_BUCKET"))
+    artifact_bucket = os.environ.get("BOLTZ_ARTIFACT_BUCKET") or os.environ.get("S3_BUCKET")
+    if not artifact_bucket:
+        raise RuntimeError("missing BOLTZ_ARTIFACT_BUCKET (or S3_BUCKET) for client-prep mode")
+    if Chem.MolFromSmiles(ligand_smiles) is None:
+        raise RuntimeError("invalid ligand smiles")
+
+    _ensure_mol_assets(Path(os.environ.get("MOLLEO_BOLTZ_CACHE_DIR", "~/.boltz")).expanduser())
+    # shared_msa_csv = _get_or_create_shared_msa_csv(protein_name)
+    if os.path.isfile(f"/data/boltz/msa/{protein_name}.csv"):
+        shared_msa_csv = f"/data/boltz/msa/{protein_name}.csv"
+    else:
+        shared_msa_csv = None
+
+    run_token = f"{int(time.time())}_{uuid.uuid4().hex[:10]}"
+    record_id = f"{experiment_id}_{protein_name}_{_sha1_text(ligand_smiles)[:12]}"
+    with tempfile.TemporaryDirectory(prefix=f"molleo_art_{run_token}_") as tmp:
+        tmp_root = Path(tmp)
+        in_dir = tmp_root / "yaml"
+        out_dir = tmp_root / "prep"
+        in_dir.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        yaml_path = in_dir / f"{record_id}.yaml"
+        _write_input_yaml(
+            protein_name,
+            ligand_smiles,
+            yaml_path,
+            msa_path=shared_msa_csv,
+        )
+
+        use_msa_server = bool(os.environ.get("BOLTZ_USE_MSA_SERVER", "1").lower() in ("1", "true", "yes"))
+        msa_server_url = os.environ.get("BOLTZ_MSA_SERVER_URL") or os.environ.get(
+                            "MSA_PROXY_URL",
+                            "http://boltz-msa-proxy.spatiotemporal-decision-making.svc.cluster.local:8000",
+                        )
+        msa_server_username = os.environ.get("BOLTZ_MSA_USERNAME")
+        msa_server_password = os.environ.get("BOLTZ_MSA_PASSWORD")
+        api_key_header = os.environ.get("MSA_API_KEY_HEADER", "X-API-Key")
+        api_key_value = os.environ.get("MSA_API_KEY_VALUE")
+        if shared_msa_csv is not None:
+            use_msa_server = False
+            msa_server_url = "local://provided-msa"
+            msa_server_username = None
+            msa_server_password = None
+            api_key_header = None
+            api_key_value = None
+
+        process_inputs(
+            data=[yaml_path],
+            out_dir=out_dir,
+            ccd_path=Path(os.environ.get("MOLLEO_BOLTZ_CACHE_DIR", "~/.boltz")).expanduser() / "ccd.pkl",
+            mol_dir=Path(os.environ.get("MOLLEO_BOLTZ_CACHE_DIR", "~/.boltz")).expanduser() / "mols",
+            msa_server_url=msa_server_url,
+            msa_pairing_strategy=os.environ.get("BOLTZ_MSA_PAIRING_STRATEGY", "greedy"),
+            max_msa_seqs=int(os.environ.get("BOLTZ_MAX_MSA_SEQS", "8192")),
+            use_msa_server=use_msa_server,
+            msa_server_username=msa_server_username,
+            msa_server_password=msa_server_password,
+            api_key_header=api_key_header,
+            api_key_value=api_key_value,
+            boltz2=True,
+            preprocessing_threads=max(1, int(os.environ.get("BOLTZ_PREPROCESS_THREADS", "4"))),
+        )
+
+        record_json = out_dir / "processed" / "records" / f"{record_id}.json"
+        if not record_json.exists():
+            raise RuntimeError(f"missing processed record for {record_id}")
+
+        tar_path = tmp_root / f"{run_token}.tar.gz"
+        with tarfile.open(tar_path, "w:gz") as tf:
+            tf.add(out_dir / "processed", arcname="processed")
+        artifact_sha = _sha256_file(tar_path)
+
+        artifact_prefix = os.environ.get("BOLTZ_ARTIFACT_PREFIX", "molleo-fast-artifacts")
+        artifact_key = f"{artifact_prefix.rstrip('/')}/{experiment_id}/{run_token}.tar.gz"
+        s3 = _get_s3_client()
+        s3.upload_file(str(tar_path), artifact_bucket, artifact_key)
+        artifact_uri = s3.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={"Bucket": artifact_bucket, "Key": artifact_key},
+            ExpiresIn=24*3600,
+        )
+
+    return ArtifactPayload(record_id=record_id, artifact_uri=artifact_uri, artifact_sha256=artifact_sha)
+
+
+num_gpus = torch.cuda.device_count()
+# API_URL = "https://andrew-boltz-api.nrp-nautilus.io/predict_affinity"
 use_nautilus = True
 use_local = False
 
@@ -67,7 +386,7 @@ def top_auc(buffer, top_n, finish, freq_log, max_oracle_calls):
 
 def tuple_to_score(input_tuple, oracle, *args):
     for idx, element in enumerate(input_tuple):
-        if args[idx][0] == "c-met" or args[idx][0] == "brd4":
+        if args[idx][0] in POSSIBLE_TARGETS:
             affin = -(element/13) if oracle == "boltz" else -(element/15)
         elif args[idx][0] == "qed":
             qed = (1 - element)
@@ -115,45 +434,87 @@ def get_ready_pod_count(namespace, deployment_name):
         return -1
 
 def calculate_boltz_nautilus(protein_name, ligand_smiles, idx):
-    print(f"\n[Worker {str(idx)}] Sending job for {ligand_smiles}...", flush=True)
-    
-    query_params = {
+    print(f"\n[Worker {str(idx)}] Sending job for {ligand_smiles[:60]}...", flush=True)
+
+    payload = {
         "protein_name": protein_name,
-        "ligand": ligand_smiles
+        "ligand": ligand_smiles,
+        "experiment_id": os.environ.get("BOLTZ_EXPERIMENT_ID", "molleo_multi"),
     }
-    worker_lifetime = time.time()
-    num_errors = 0
-    while True:
+    cache_key = (protein_name, ligand_smiles)
+    artifact = _ARTIFACT_PAYLOAD_CACHE.get(cache_key)
+    if artifact is None:
+        prep_start = time.time()
+        try:
+            with ThreadPoolExecutor(max_workers=1) as prep_pool:
+                prep_future = prep_pool.submit(
+                    _prepare_single_artifact,
+                    protein_name=protein_name,
+                    ligand_smiles=ligand_smiles,
+                    experiment_id=payload["experiment_id"],
+                )
+                timeout = CLIENT_PREP_TIMEOUT_SEC if CLIENT_PREP_TIMEOUT_SEC > 0 else None
+                artifact = prep_future.result(timeout=timeout)
+
+        except TimeoutError:
+            print(
+                f"[Worker {str(idx)}] client-prep timed out after {CLIENT_PREP_TIMEOUT_SEC}s",
+                flush=True,
+            )
+            return 0
+        except Exception as e:
+            print(
+                f"[Worker {str(idx)}] client-prep failed for {ligand_smiles[:60]}: {e}",
+                flush=True,
+            )
+            traceback.print_exc()
+            return 0
+
+        print(f"[Worker {str(idx)}] client-prep ok in {time.time()-prep_start:.1f}s", flush=True)
+        _ARTIFACT_PAYLOAD_CACHE[cache_key] = artifact
+        print(_ARTIFACT_PAYLOAD_CACHE)
+        payload["record_id"] = artifact.record_id
+        payload["artifact_uri"] = artifact.artifact_uri
+        payload["artifact_sha256"] = artifact.artifact_sha256
+
+    for attempt in range(1, REQUEST_MAX_RETRIES + 1):
         try:
             before = time.time()
-            response = requests.post(API_URL, params=query_params, headers={'Connection': 'close'})
+            print(payload)
+            response = _REQUEST_SESSION.post(
+                url="https://boltz-api.nrp-nautilus.io/predict_affinity",
+                json=payload,
+                headers={"Connection": "close"},
+                timeout=REQUEST_TIMEOUT_SEC,
+            )
             after = time.time()
-            print(response)
             if response.status_code == 200:
                 result = response.json()
-                print(f"\n[Worker {str(idx)}] Success")
+                status = result.get("status", "unknown")
+                print(f"[Worker {str(idx)}] {status} in {after-before:.1f}s", flush=True)
                 print(result)
-                print(f"[Worker {str(idx)}]Took: {str(after-before)} seconds", flush=True)
-                time.sleep(0.1)
-                return result["affinity"]
-            elif response.status_code == 429 or response.status_code == 503:
-                sleep_time = random.uniform(0.5, 2.0)
-                print(f"[Worker {str(idx)}] Busy: Retrying", flush=True)
-                current_lifetime = time.time()
-                if worker_lifetime - current_lifetime > 3600:
-                    print(f"[Worker {str(idx)}] Worker has been stalled for {str(worker_lifetime-current_lifetime)} seconds. Exiting.", flush=True)
-                    return 0
-                time.sleep(sleep_time)
+                if status == "success":
+                    return result.get("affinity", 0)
+                print(f"[Worker {str(idx)}] Fail: {result.get('error', 'unknown')}", flush=True)
+                return 0
+            if response.status_code in (429, 502, 503, 504):
+                print(
+                    f"[Worker {str(idx)}] transient {response.status_code} "
+                    f"(attempt {attempt}/{REQUEST_MAX_RETRIES})",
+                    flush=True,
+                )
             else:
-                print(f"[Worker {str(idx)}] Error {response.status_code}: {response.text}", flush=True)
-                num_errors += 1
-                if num_errors >= 100:
-                    return 0
-                time.sleep(10)
+                print(f"[Worker {str(idx)}] Error {response.status_code}: {response.text[:200]}", flush=True)
+                return 0
         except Exception as e:
-            print(f"\n[Worker {str(idx)}] Connection failed: {str(e)}", flush=True)        
-            time.sleep(3)
-            return 0
+            print(
+                f"[Worker {str(idx)}] Connection failed (attempt {attempt}/{REQUEST_MAX_RETRIES}): {str(e)}",
+                flush=True,
+            )
+        if attempt < REQUEST_MAX_RETRIES:
+            time.sleep(REQUEST_RETRY_BASE_SEC * attempt)
+    print(f"[Worker {str(idx)}] Exhausted retries", flush=True)
+    return 0
 
 def gpu_worker(gpu_id, task_q, result_q, max_evaluator, min_evaluator, affin_cache, oracle):
     while True:
@@ -173,7 +534,7 @@ def gpu_worker(gpu_id, task_q, result_q, max_evaluator, min_evaluator, affin_cac
                         if eva_name == 'qed':
                             mol = Chem.MolFromSmiles(smi)
                             single_score.append(1 - eva(mol))
-                        elif eva_name == "c-met" or eva_name == "brd4":
+                        elif eva_name in POSSIBLE_TARGETS:
                             if val is not None or smi in affin_cache[eva_name]:
                                 affin = affin_cache[eva_name][smi]
                             else:
@@ -194,7 +555,7 @@ def gpu_worker(gpu_id, task_q, result_q, max_evaluator, min_evaluator, affin_cac
                         if eva_name == 'sa':
                             mol = Chem.MolFromSmiles(smi)
                             single_score.append((eva(mol) - 1)/9)
-                        elif eva_name == "c-met" or eva_name == "brd4":
+                        elif eva_name in POSSIBLE_TARGETS:
                             if val is not None or smi in affin_cache[eva_name]:
                                 affin = affin_cache[eva_name][smi]
                             else:
@@ -234,8 +595,8 @@ class Oracle:
             self.freq_log = args.freq_log
         self.mol_buffer = {}
         self.storing_buffer = {}
-        self.sa_scorer = tdc.Oracle(name = 'SA')
-        self.diversity_evaluator = tdc.Evaluator(name = 'Diversity')
+        # self.sa_scorer = tdc.Oracle(name = 'SA')
+        # self.diversity_evaluator = tdc.Evaluator(name = 'Diversity')
         self.last_log = 0
         self.config = config
         self.affin_cache = defaultdict(dict)
@@ -249,77 +610,85 @@ class Oracle:
     def parallel_oracle(self, inputs):
         print(inputs)
         print("Number of GPUs available: " + str(num_gpus))
-        assert num_gpus > 0, "No GPUs available"
 
-        ctx = mp.get_context("spawn")
-        task_q = ctx.Queue()
-        result_q = ctx.Queue()
-
-        # enqueue tasks
-        num_added = 0
-        for i, x in enumerate(inputs):
-            if len(self.mol_buffer) + num_added >= self.max_oracle_calls:
-                task_q.put((i, None, None))
-                continue
-            if x in self.mol_buffer:
-                task_q.put((i, x, self.mol_buffer[x][0]))
-            else:
-                task_q.put((i, x, None))
-                num_added += 1
-        
-        if self.affin_oracle == "boltz":
-            num_nautilus = get_ready_pod_count("spatiotemporal-decision-making", "andrew-boltz-api")
-            if use_nautilus and num_nautilus == -1:
-                num_nautilus = 20
-                
-            num_workers = 0
-            num_workers += num_gpus if use_local else 0
-            num_workers += num_nautilus if use_nautilus else 0
-            
-            num_workers = 9
-            print(f"{str(num_workers)} workers available ({str(num_gpus)} local, {str(num_nautilus)} on Nautilus)")
-        elif self.affin_oracle == "docking":
-            num_workers = 10
-            
-        if num_workers == 0:
-            print("No workers available!")
-            sys.exit(1)
-            
-        procs = []
-        for gpu_id in range(min(num_workers, task_q.qsize())):
-            p = ctx.Process(target=gpu_worker, args=(gpu_id, task_q, result_q, self.max_evaluator, self.min_evaluator, self.affin_cache, self.affin_oracle))
-            p.start()
-            procs.append(p)
-            time.sleep(0.1)
-
-        # collect results
+        n_scores = len(self.max_evaluator) + len(self.min_evaluator)
         results = [None] * len(inputs)
         buffer_length = len(self.mol_buffer)
         num_added = 0
-        for i in range(len(inputs)):
-            idx, x, single_score, affin_scores = result_q.get()
-            
-            # results array
-            results[idx] = single_score
-            
-            # boltz cache
-            affin_idx = 0
+
+        def _score_one(idx, smi, val):
+            """Mirrors gpu_worker logic exactly, minus the queue/process overhead."""
+            if smi is None:
+                zeros = [0] * n_scores
+                return idx, smi, zeros, zeros
+
+            single_score = []
+            affin_scores = []
             for eva_tuple in self.max_evaluator:
-                if eva_tuple[0] == "c-met" or eva_tuple[0] == "brd4":
-                    self.affin_cache[eva_tuple[0]][x] = affin_scores[affin_idx]
-                    affin_idx += 1
+                eva_name, eva = eva_tuple[0], eva_tuple[1]
+                if eva_name == 'qed':
+                    mol = Chem.MolFromSmiles(smi)
+                    single_score.append(1 - eva(mol))
+                elif eva_name in POSSIBLE_TARGETS:
+                    if val is not None or smi in self.affin_cache[eva_name]:
+                        affin = self.affin_cache[eva_name][smi]
+                    else:
+                        if self.affin_oracle == "boltz":
+                            affin = calculate_boltz_nautilus(eva_name, smi, idx)
+                        elif self.affin_oracle == "docking":
+                            affin = calculate_docking(eva_name, smi)
+                    affin_scores.append(affin)
+                    single_score.append(-affin)
+                else:
+                    single_score.append(1 - eva(smi))
             for eva_tuple in self.min_evaluator:
-                if eva_tuple[0] == "c-met" or eva_tuple[0] == "brd4":
-                    self.affin_cache[eva_tuple[0]][x] = affin_scores[affin_idx]
-                    affin_idx += 1
-            
-            # mol buffer
-            if x not in self.mol_buffer and any(single_score): 
-                self.mol_buffer[x] = [tuple_to_score(single_score, self.affin_oracle, *self.max_evaluator, *self.min_evaluator), buffer_length+num_added+1]
+                eva_name, eva = eva_tuple[0], eva_tuple[1]
+                if eva_name == 'sa':
+                    mol = Chem.MolFromSmiles(smi)
+                    single_score.append((eva(mol) - 1) / 9)
+                elif eva_name in POSSIBLE_TARGETS:
+                    if val is not None or smi in self.affin_cache[eva_name]:
+                        affin = self.affin_cache[eva_name][smi]
+                    else:
+                        if self.affin_oracle == "boltz":
+                            affin = calculate_boltz_nautilus(eva_name, smi, idx)
+                        elif self.affin_oracle == "docking":
+                            affin = calculate_docking(eva_name, smi)
+                    affin_scores.append(affin)
+                    single_score.append(affin)
+                else:
+                    single_score.append(1 - eva(smi))
+            return idx, smi, single_score, affin_scores
+
+        # -- Thread-based path (fast for cached/QED/SA-only workloads) --
+        tasks = []
+        for i, x in enumerate(inputs):
+            if len(self.mol_buffer) + num_added >= self.max_oracle_calls:
+                tasks.append((i, None, None))
+            elif x in self.mol_buffer:
+                tasks.append((i, x, self.mol_buffer[x][0]))
+            else:
+                tasks.append((i, x, None))
                 num_added += 1
+
+        with ThreadPoolExecutor(max_workers=min(len(inputs), 20)) as pool:
+            futures = {pool.submit(_score_one, *task): task for task in tasks}
+            for future in as_completed(futures):
+                idx, x, single_score, affin_scores = future.result()
+                results[idx] = single_score
+                affin_idx = 0
+                for eva_tuple in self.max_evaluator:
+                    if eva_tuple[0] in POSSIBLE_TARGETS:
+                        self.affin_cache[eva_tuple[0]][x] = affin_scores[affin_idx]
+                        affin_idx += 1
+                for eva_tuple in self.min_evaluator:
+                    if eva_tuple[0] in POSSIBLE_TARGETS:
+                        self.affin_cache[eva_tuple[0]][x] = affin_scores[affin_idx]
+                        affin_idx += 1
+                if x is not None and x not in self.mol_buffer and any(single_score):
+                    self.mol_buffer[x] = [tuple_to_score(single_score, self.affin_oracle, *self.max_evaluator, *self.min_evaluator), buffer_length + num_added + 1]
+                    num_added += 1
                 
-        for p in procs:
-            p.join()
         print("RESULTS: " + str(results))
         print(self.mol_buffer)
         return results
@@ -347,6 +716,8 @@ class Oracle:
                 self.max_evaluator.append(("c-met", calculate_boltz))
             elif self.max_obj[idx] == "brd4":
                 self.max_evaluator.append(("brd4", calculate_boltz))
+            elif self.max_obj[idx] == "1com":
+                self.max_evaluator.append(("1com", calculate_boltz))
             # eva = tdc.Oracle(name = self.max_obj[idx])
             # self.max_evaluator.append(eva)
         
@@ -359,6 +730,8 @@ class Oracle:
                 self.min_evaluator.append(("c-met", calculate_boltz))
             elif self.min_obj[idx] == "brd4":
                 self.min_evaluator.append(("brd4", calculate_boltz))
+            elif self.min_obj[idx] == "1com":
+                self.min_evaluator.append(("1com", calculate_boltz))
             # eva = tdc.Oracle(name = self.min_obj[idx])
             # self.min_evaluator.append(eva)
 
@@ -375,7 +748,7 @@ class Oracle:
                 mol = Chem.MolFromSmiles(smi)
                 evaluation = eva(mol)
                 score = score + evaluation
-            elif eva_name == "c-met" or eva_name == "brd4":
+            elif eva_name in POSSIBLE_TARGETS:
                 scale = 1
                 if smi in self.affin_cache[eva_name]:
                     evaluation = self.affin_cache[eva_name][smi]
@@ -394,7 +767,7 @@ class Oracle:
                 mol = Chem.MolFromSmiles(smi)
                 evaluation = eva(mol)
                 score = score + (1 - ((evaluation - 1)/9))
-            elif eva_name == "c-met" or eva_name == "brd4":
+            elif eva_name in POSSIBLE_TARGETS:
                 scale = 1
                 if smi in self.affin_cache[eva_name]:
                     evaluation = self.affin_cache[eva_name][smi]
@@ -478,15 +851,16 @@ class Oracle:
         avg_top1 = np.max(scores)
         avg_top10 = np.mean(sorted(scores, reverse=True)[:10])
         avg_top100 = np.mean(scores)
-        avg_sa = np.mean(self.sa_scorer(smis))
-        diversity_top100 = self.diversity_evaluator(smis)
+        # avg_sa = np.mean(self.sa_scorer(smis))
+        # diversity_top100 = self.diversity_evaluator(smis)
         
         print(f'{n_calls}/{self.max_oracle_calls} | '
                 f'avg_top1: {avg_top1:.3f} | '
                 f'avg_top10: {avg_top10:.3f} | '
                 f'avg_top100: {avg_top100:.3f} | '
-                f'avg_sa: {avg_sa:.3f} | '
-                f'div: {diversity_top100:.3f}')
+                # f'avg_sa: {avg_sa:.3f} | '
+                # f'div: {diversity_top100:.3f}'
+                )
 
         # try:
         print({
@@ -496,8 +870,8 @@ class Oracle:
             "auc_top1": top_auc(self.mol_buffer, 1, finish, self.freq_log, self.max_oracle_calls),
             "auc_top10": top_auc(self.mol_buffer, 10, finish, self.freq_log, self.max_oracle_calls),
             "auc_top100": top_auc(self.mol_buffer, 100, finish, self.freq_log, self.max_oracle_calls),
-            "avg_sa": avg_sa,
-            "diversity_top100": diversity_top100,
+            # "avg_sa": avg_sa,
+            # "diversity_top100": diversity_top100,
             "n_oracle": n_calls,
         })
 
@@ -637,17 +1011,19 @@ class BaseOptimizer:
             self.all_smiles = self.load_smiles_from_file(self.smi_file)
         else:  
             if args.starting == "zinc":      
-                data = MolGen(name = 'ZINC')
-                self.all_smiles = data.get_data()['smiles'].tolist()
+                self.all_smiles = [line.strip().strip('"') for line in open("/home/ubuntu/MOLLEO/multi_objective/data/zinc.tab") if not line.startswith("smiles")]
+                
+                # data = MolGen(name = 'ZINC')
+                # self.all_smiles = data.get_data()['smiles'].tolist()
             else:
                 with open(f"/home/ubuntu/MOLLEO/multi_objective/data/{args.min_obj[0]}.txt", "r") as file:
                     for line in file:
                         ligand = line.strip()
                         self.all_smiles.append(ligand)
             
-        self.sa_scorer = tdc.Oracle(name = 'SA')
-        self.diversity_evaluator = tdc.Evaluator(name = 'Diversity')
-        self.filter = tdc.chem_utils.oracle.filter.MolFilter(filters = ['PAINS', 'SureChEMBL', 'Glaxo'], property_filters_flag = False)
+        # self.sa_scorer = tdc.Oracle(name = 'SA')
+        # self.diversity_evaluator = tdc.Evaluator(name = 'Diversity')
+        # self.filter = tdc.chem_utils.oracle.filter.MolFilter(filters = ['PAINS', 'SureChEMBL', 'Glaxo'], property_filters_flag = False)
 
     # def load_smiles_from_file(self, file_name):
     #     with open(file_name) as f:
@@ -751,12 +1127,12 @@ class BaseOptimizer:
         # initial affin values
         if self.seed <= 4:
             for eva in self.args.min_obj:
-                if eva == "c-met" or eva == "brd4":
+                if eva in POSSIBLE_TARGETS and os.path.isfile(f"/home/ubuntu/MOLLEO/{self.args.oracle}_caches/{eva}_{str(self.seed)}.yaml"):
                     with open(f"/home/ubuntu/MOLLEO/{self.args.oracle}_caches/{eva}_{str(self.seed)}.yaml", 'r') as file:
                         self.oracle.affin_cache[eva] = yaml.safe_load(file)
                         print(self.oracle.affin_cache)
             for eva in self.args.max_obj:
-                if eva == "c-met" or eva == "brd4":
+                if eva in POSSIBLE_TARGETS and os.path.isfile(f"/home/ubuntu/MOLLEO/{self.args.oracle}_caches/{eva}_{str(self.seed)}.yaml"):
                     with open(f"/home/ubuntu/MOLLEO/{self.args.oracle}_caches/{eva}_{str(self.seed)}.yaml", 'r') as file:
                         self.oracle.affin_cache[eva] = yaml.safe_load(file)
                         print(self.oracle.affin_cache)

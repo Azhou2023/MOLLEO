@@ -11,10 +11,9 @@ from rdkit.Chem import QED
 from rdkit.Chem import DataStructs
 from rdkit.Chem import Descriptors
 from scipy.stats import ttest_ind
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 from pymoo.indicators.hv import HV
-import matplotlib.pyplot as plt
 import re
 from rdkit.Chem import RDConfig
 sys.path.append(os.path.join(RDConfig.RDContribDir, 'SA_Score'))
@@ -124,7 +123,7 @@ def analyze_results(run_name, pop_size=120, limit=False, llm_only=True, eval_sim
                     cmet.append(ligand)
                     cache[ligand] = float(data[ligand][0])
                     continue
-                if (llm_only is False or ligand in llm_ligands) and float(data[ligand][0])<=0:
+                if (llm_only is False or ligand in llm_ligands) and float(data[ligand][0])<0:
                     affin = float(data[ligand][0])
                     qed = float(data[ligand][2])
                     sa = float(data[ligand][3])
@@ -187,7 +186,6 @@ def analyze_results(run_name, pop_size=120, limit=False, llm_only=True, eval_sim
         
         sorted_ligands = sorted(ligands, key=lambda k: ligands[k][0])
         sim_filtered_ligands = [ligand for ligand in sorted_ligands if ligands[ligand][3] < 0.5]
-        
         c = cluster(sorted_ligands)
         c = sorted(c, key=lambda k: ligands[k][0])
         best_10_cluster = []
@@ -338,9 +336,9 @@ def analyze_results(run_name, pop_size=120, limit=False, llm_only=True, eval_sim
 # plt.ylim(-11, -8)
 # plt.savefig('/home/ubuntu/MOLLEO/multi_objective/trajectory.png')
 
-# hv_ttest1, fmean_ttest1, ligands1 = analyze_results("GPT-oss_c-met_molleo_12_7", pop_size=12, limit=False, llm_only=False, eval_sim=False, num_seeds=5)
+hv_ttest1, fmean_ttest1, ligands1 = analyze_results("GPT-oss_c-met_tools_exp_prob_60_35", pop_size=60, limit=False, llm_only=False, eval_sim=False, num_seeds=5)
 # hv_ttest2, fmean_ttest2, ligands2 = analyze_results("GPT-oss_c-met_tools_molleo_ga_12_7", pop_size=12, limit=False, llm_only=False, eval_sim=False, num_seeds=5)
-hv_ttest2, fmean_ttest2, ligands2 = analyze_results("GPT-oss_c-met_tools_exp_prob_60_35", pop_size=60, limit=False, llm_only=False, eval_sim=False, num_seeds=3)
+hv_ttest2, fmean_ttest2, ligands2 = analyze_results("GPT-oss_c-met_tools_exp_prob_10_60_35", pop_size=60, limit=False, llm_only=False, eval_sim=False, num_seeds=5)
 
 bindingdb = []
 with open("/home/ubuntu/LLaMA-Factory/bindingdb/cmet.txt", 'r') as file:

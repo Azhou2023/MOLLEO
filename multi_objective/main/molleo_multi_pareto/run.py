@@ -1,7 +1,8 @@
 from __future__ import print_function
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
+import time
 from typing import List
 import math
 
@@ -13,7 +14,7 @@ from rdkit.Chem.rdchem import Mol
 rdBase.DisableLog('rdApp.error')
 
 import main.molleo_multi_pareto.crossover as co, main.molleo_multi_pareto.mutate as mu
-from main.pareto_optimizer import BaseOptimizer
+from main.pareto_optimizer import BaseOptimizer, calculate_boltz_nautilus, POSSIBLE_TARGETS
 
 #from main.graph_ga.mol_lm import MolCLIP
 from main.molleo_multi_pareto.biot5 import BioT5
@@ -38,20 +39,20 @@ def make_mating_pool(population_smiles: List[Mol], population_scores, pareto_tab
     all_tuples = list(zip(population_scores, population_smiles))
     
     # uniform distribution
-    # population_scores = [s + MINIMUM for s in population_scores]
-    # sum_scores = sum(population_scores)
-    # population_probs = [p / sum_scores for p in population_scores]
-    # print(all_tuples)
-    # print(population_probs)
-    # mating_indices = np.random.choice(len(all_tuples), p=population_probs, size=offspring_size, replace=True)
-    
-    # exponential prob
-    population_scores = [math.pow(10, s + MINIMUM) for s in population_scores]
+    population_scores = [s + MINIMUM for s in population_scores]
     sum_scores = sum(population_scores)
     population_probs = [p / sum_scores for p in population_scores]
-    print(population_scores)
+    print(all_tuples)
     print(population_probs)
     mating_indices = np.random.choice(len(all_tuples), p=population_probs, size=offspring_size, replace=True)
+    
+    # exponential prob
+    # population_scores = [math.pow(10, s + MINIMUM) for s in population_scores]
+    # sum_scores = sum(population_scores)
+    # population_probs = [p / sum_scores for p in population_scores]
+    # print(population_scores)
+    # print(population_probs)
+    # mating_indices = np.random.choice(len(all_tuples), p=population_probs, size=offspring_size, replace=True)
     
     
     # rank selection
@@ -149,9 +150,57 @@ class GB_GA_Optimizer(BaseOptimizer):
             fp_scores = []
             offspring_mol_temp = []
             if self.args.mol_lm == 'GPT-4' or self.args.mol_lm == "GPT-oss":
-                with ThreadPoolExecutor(max_workers=min(config["offspring_size"], 12)) as pool:
-                    inputs = [(idx, mating_tuples, config["mutation_rate"], self.oracle.min_evaluator, self.oracle.max_evaluator, self.oracle.affin_cache, self.args.single_parent, self.args.use_tools) for idx in range(config["offspring_size"])]
-                    offspring_smiles = list(pool.map(lambda x: self.mol_lm.edit(*x), inputs))
+                before = time.time()
+                inputs = [
+                    (idx, mating_tuples, config["mutation_rate"], self.oracle.min_evaluator,
+                    self.oracle.max_evaluator, self.oracle.affin_cache,
+                    self.args.single_parent, self.args.use_tools)
+                    for idx in range(config["offspring_size"])
+                ]
+
+                gen_futures = {}   # future -> idx
+                eval_futures = {}  # future -> (idx, smiles)
+                print(set(self.oracle.min_evaluator))
+                print(set(POSSIBLE_TARGETS))
+                target = list(set([eva[0] for eva in self.oracle.min_evaluator]) & set(POSSIBLE_TARGETS))[0]
+                print(target)
+                offspring_smiles = []
+                with ThreadPoolExecutor(max_workers=min(config["offspring_size"], 20)) as gen_pool, \
+                    ThreadPoolExecutor(max_workers=min(config["offspring_size"], 20)) as eval_pool:
+
+                    # Submit all generation tasks upfront
+                    for inp in inputs:
+                        idx = inp[0]
+                        f = gen_pool.submit(self.mol_lm.edit, *inp)
+                        gen_futures[f] = idx
+
+                    # As each generation completes, immediately dispatch to evaluation.
+                    # The gen_pool keeps running its remaining workers concurrently.
+                    for gen_future in as_completed(gen_futures):
+                        idx = gen_futures[gen_future]
+                        try:
+                            smiles = gen_future.result()
+                        except Exception as e:
+                            print(f"[Gen {idx}] Generation failed: {e}", flush=True)
+                            smiles = None
+
+                        if smiles is not None:
+                            offspring_smiles.append(smiles)
+                            eval_f = eval_pool.submit(calculate_boltz_nautilus, target, smiles, idx)
+                            eval_futures[eval_f] = (idx, smiles)
+
+                    # Collect evaluation results as they complete
+                    results = {}  # idx -> (smiles, score)
+                    for eval_future in as_completed(eval_futures):
+                        idx, smiles = eval_futures[eval_future]
+                        try:
+                            score = eval_future.result()
+                        except Exception as e:
+                            print(f"[Eval {idx}] Evaluation failed: {e}", flush=True)
+                            score = 0
+                        self.oracle.affin_cache[target][smiles] = score
+                after = time.time()
+                print(f"LLM generation took {str(after-before)} seconds")
                     
                 # offspring_smiles = [self.mol_lm.edit(mating_tuples, config["mutation_rate"], self.oracle.min_evaluator, self.oracle.max_evaluator, self.oracle.affin_cache, single_parent=self.args.single_parent) for _ in range(config["offspring_size"])]
             elif self.args.mol_lm == 'BioT5':
@@ -195,7 +244,10 @@ class GB_GA_Optimizer(BaseOptimizer):
             print("Population size: " + str(len(population_smiles)))
             
             if not self.args.weighted_obj:
+                before = time.time()
                 population_smiles = list(self.oracle.select_pareto_front(population_smiles))
+                after = time.time()
+                print(f"Boltz calculation took {str(after-before)} seconds")
                 pareto_table = {}
                 for idx, smiles in enumerate(population_smiles):
                     pareto_table[smiles] = idx

@@ -27,11 +27,15 @@ import sascorer
 load_dotenv()
 
 # client = OpenAI(api_key=os.getenv("GPT_KEY"))
-client = OpenAI(base_url="https://gpt-oss-120b-andrew.nrp-nautilus.io/v1",
+client = OpenAI(base_url="https://gpt-oss-120b-svarambally.nrp-nautilus.io/v1",
                 api_key=os.getenv("OSS_KEY"))
 
 # client = OpenAI(base_url="https://ellm.nrp-nautilus.io/v1",
 #                 api_key=os.getenv("NAUTILUS_KEY"))
+
+# LLM_BASE_URL = os.getenv("MOLLEO_LLM_BASE_URL", "https://gpt-oss-120b-andrew.nrp-nautilus.io/v1")
+# LLM_API_KEY = os.getenv("OSS_KEY") or os.getenv("CLIENT_API_KEY")
+# client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
 
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Crippen, rdMolDescriptors
@@ -1194,7 +1198,7 @@ def run_agent(
 
 def query_LLM(messages, index):
     response = client.responses.create(
-        model='gpt-oss',
+        model='gpt-oss-120b',
         input=messages,
     )
         
@@ -1210,7 +1214,8 @@ class GPToss:
     def __init__(self):
         self.task2description = {
                 'c-met': 'I have two molecules and their QED, SA (Synthetic Accessibility), c-MET (docking scores to the kinase c-MET) scores. The docking score measures how well a molecule binds to c-MET. A lower docking score generally indicates a stronger or more favorable binding affinity.\n\n',
-                'brd4': 'I have two molecules and their docking scores to BRD4. The docking score measures how well a molecule binds to BRD4. A lower docking score generally indicates a stronger or more favorable binding affinity.\n\n',
+                'brd4': 'I have two molecules and their QED, SA (Synthetic Accessibility), BRD4 (docking scores to the bromodomain-containing protein BRD4) scores. The docking score measures how well a molecule binds to BRD4. A lower docking score generally indicates a stronger or more favorable binding affinity.\n\n',
+                '1com': 'I have two molecules and their QED, SA (Synthetic Accessibility), 1COM (docking scores to the chorismate mutase 1COM) scores. The docking score measures how well a molecule binds to 1COM. A lower docking score generally indicates a stronger or more favorable binding affinity.\n\n',
                 'qed': 'I have two molecules and their QED scores. The QED score measures the drug-likeness of the molecule.\n\n',
                 'jnk3': 'I have two molecules and their JNK3 scores. The JNK3 score measures a molecular\'s biological activity against JNK3.\n\n',
                 'drd2': 'I have two molecules and their DRD2 scores. The DRD2 score measures a molecule\'s biological activity against a biological target named the dopamine type 2 receptor (DRD2).\n\n',
@@ -1225,6 +1230,7 @@ class GPToss:
         self.task2objective = {
                 'c-met': 'Please propose a new molecule that binds better to c-MET. You can either make crossover and mutations based on the given molecules or just propose a new molecule based on your knowledge.\n\n',
                 'brd4': 'Please propose a new molecule that binds better to BRD4. You can either make crossover and mutations based on the given molecules or just propose a new molecule based on your knowledge.\n\n',
+                '1com': 'Please propose a new molecule that binds better to 1COM. You can either make crossover and mutations based on the given molecules or just propose a new molecule based on your knowledge.\n\n',
                 'qed': 'Please propose a new molecule that has a higher QED score. You can either make crossover and mutations based on the given molecules or just propose a new molecule based on your knowledge.\n\n',
                 'jnk3': 'Please propose a new molecule that has a higher JNK3 score. You can either make crossover and mutations based on the given molecules or just propose a new molecule based on your knowledge.\n\n',
                 'drd2': 'Please propose a new molecule that has a higher DRD2 score. You can either make crossover and mutations based on the given molecules or just propose a new molecule based on your knowledge.\n\n',
@@ -1246,7 +1252,7 @@ class GPToss:
     def edit(self, idx, mating_tuples, mutation_rate, min_evaluators, max_evaluators, affin_cache, single_parent=False, use_tools=False):
         task = self.task
         all_objectives = min_evaluators + max_evaluators
-        obj_map = {"qed": "QED", "sa": "SA (Synthetic Accessibility)", "c-met": "Binding Affinity against the kinase c-MET", "brd4": "Binding Affinity against BRD4"}
+        obj_map = {"qed": "QED", "sa": "SA (Synthetic Accessibility)", "c-met": "Binding Affinity against the kinase c-MET", "brd4": "Binding Affinity against the bromodomain-containing protein BRD4", "1com": "Binding Affinity against the chorismate mutase 1COM"}
         
         task_definition = "I have a molecule and its "
         for objective in all_objectives[:-1]:
@@ -1265,20 +1271,20 @@ class GPToss:
         try: 
             task_objective = "\nI want to "
             for min_obj in min_evaluators:
-                if min_obj[0] == "c-met" or min_obj[0] == "brd4":
+                if min_obj[0] == "c-met" or min_obj[0] == "brd4" or min_obj[0] == "1com":
                     task_objective += "improve "
                 else:
                     task_objective += "minimize "
                 task_objective += obj_map[min_obj[0]]
                 task_objective += ", "
             for max_obj in max_evaluators[:-1]:
-                if max_obj[0] == "c-met" or max_obj[0] == "brd4":
+                if max_obj[0] == "c-met" or max_obj[0] == "brd4" or max_obj[0] == "1com":
                     task_objective += "worsen "
                 else:
                     task_objective += "maximize "
                 task_objective += obj_map[max_obj[0]]
                 task_objective += ", "
-            task_objective += "and maximize " if max_evaluators[-1][0] != "c-met" and max_evaluators[-1][0] != "brd4" else "and worsen "
+            task_objective += "and maximize " if (max_evaluators[-1][0] != "c-met" and max_evaluators[-1][0] != "brd4" and max_evaluators[-1][0] != "1com") else "and worsen "
             task_objective += obj_map[max_evaluators[-1][0]]
             task_objective += ". "
             task_objective += "Recall that a more negative binding affinity is better, and a more positive binding affinity is worse. Please propose a new molecule better than the current molecule."
@@ -1289,7 +1295,8 @@ class GPToss:
 
                 #crossovers (2 input molecules)
                 if "c-MET" in task_objective: objective=f"{task_objective} I have given you two candidate ligands. Please propose a new molecule that binds better to c-MET. You are encouraged to make a crossover between the candidate molecules on the first step, then mutate the resulting molecule. Only make a few modifications (at most 3), then respond with FINAL_ANSWER. Do not let molecular weight exceed 700.\n"
-                if "BRD4" in task_objective: objective=f"{task_objective} I have given you two candidate ligands. Please use the provided tools to generate a new molecule that binds better to BRD4. You are encouraged to make a crossover between the candidate molecules on the first step, then mutate the resulting molecule. Only make a few modifications (at most 3), then respond with FINAL_ANSWER. Do not let molecular weight exceed 700.\n"
+                if "BRD4" in task_objective: objective=f"{task_objective} I have given you two candidate ligands. Please propose a new molecule that binds better to BRD4. You are encouraged to make a crossover between the candidate molecules on the first step, then mutate the resulting molecule. Only make a few modifications (at most 3), then respond with FINAL_ANSWER. Do not let molecular weight exceed 700.\n"
+                if "1COM" in task_objective: objective = f"{task_objective} I have given you two candidate ligands. Please propose a new molecule that binds better to 1COM. You are encouraged to make a crossover between the candidate molecules on the first step, then mutate the resulting molecule. Only make a few modifications (at most 3), then respond with FINAL_ANSWER. Do not let molecular weight exceed 700.\n"
                 mol_tuple = ''
                 for i in range(len(parent)):
                     smiles = parent_smiles[i]
@@ -1297,7 +1304,7 @@ class GPToss:
                     for obj in all_objectives: 
                         tu += obj_map[obj[0]]
                         tu+= ": "
-                        if obj[0] == "c-met" or obj[0] == "brd4":
+                        if obj[0] == "c-met" or obj[0] == "brd4" or obj[0] == "1com" :
                             score = round(affin_cache[obj[0]][smiles], 2)
                         else:    
                             mol = Chem.MolFromSmiles(smiles)
@@ -1329,7 +1336,7 @@ class GPToss:
                 protein = ""
                 task_objective = "\nI want to "
                 for min_obj in min_evaluators:
-                    if min_obj[0] == "c-met" or min_obj[0] == "brd4":
+                    if min_obj[0] == "c-met" or min_obj[0] == "brd4" or min_obj[0] == "1com":
                         task_objective += "improve "
                         protein = min_obj[0]
                     else:
@@ -1337,13 +1344,13 @@ class GPToss:
                     task_objective += obj_map[min_obj[0]]
                     task_objective += ", "
                 for max_obj in max_evaluators[:-1]:
-                    if max_obj[0] == "c-met" or max_obj[0] == "brd4":
+                    if max_obj[0] == "c-met" or max_obj[0] == "brd4" or max_obj[0] == "1com":
                         task_objective += "worsen "
                     else:
                         task_objective += "maximize "
                     task_objective += obj_map[max_obj[0]]
                     task_objective += ", "
-                task_objective += "and maximize " if max_evaluators[-1][0] != "c-met" and max_evaluators[-1][0] != "brd4" else "and worsen "
+                task_objective += "and maximize " if (max_evaluators[-1][0] != "c-met" and max_evaluators[-1][0] != "brd4" and max_evaluators[-1][0] != "1com") else "and worsen "
                 task_objective += obj_map[max_evaluators[-1][0]]
                 task_objective += ". "
                 task_objective += self.task2objective[protein]
@@ -1403,7 +1410,8 @@ class GPToss:
             if new_child is not None:
                 new_child = mu.mutate(new_child, mutation_rate)
             if new_child is not None: 
-                smiles = Chem.MolToSmiles(new_child, isomericSmiles=False, canonical=True)
+                smiles = Chem.MolToSmiles(new_child, isomericSmiles=True, canonical=True)
+                smiles = sanitize_smiles(smiles)
                 print(f"NON-LLM GENERATED: {smiles}")
                 
                 # messages.append({"role": "assistant", "content": smiles})
